@@ -23,13 +23,14 @@ export const useModelStore = create((set, get) => ({
   models: [],
   loading: false,
   lastFetched: 0,
+  // Pre-computed from models — recalculated only when models change
+  _modalityPairs: [],
 
-  // Step 1 — Load from Dexie instantly on app start
   loadFromCache: async () => {
     try {
       const cached = await db.modelsCache.toArray()
       if (cached.length > 0) {
-        set({ models: cached })
+        set({ models: cached, _modalityPairs: computeModalityPairs(cached) })
         console.log('[models] Loaded', cached.length, 'from cache')
       }
     } catch (e) {
@@ -37,7 +38,6 @@ export const useModelStore = create((set, get) => ({
     }
   },
 
-  // Step 2 — Fetch from API + save to Dexie
   fetch: async (force = false) => {
     const { lastFetched, models } = get()
     if (!force && Date.now() - lastFetched < 5 * 60 * 1000 && models.length > 0) return
@@ -54,7 +54,7 @@ export const useModelStore = create((set, get) => ({
           } catch (e) {
             console.warn('[models] Cache save failed', e)
           }
-          set({ models, loading: false, lastFetched: Date.now() })
+          set({ models, loading: false, lastFetched: Date.now(), _modalityPairs: computeModalityPairs(models) })
         } else {
           set({ loading: false })
         }
@@ -65,40 +65,21 @@ export const useModelStore = create((set, get) => ({
     return _fetchPromise
   },
 
-  // Step 3 — Start background polling every 10 mins
   startPolling: () => {
     if (_pollInterval) return
-    _pollInterval = setInterval(() => {
-      get().fetch(true)
-    }, 10 * 60 * 1000)
+    _pollInterval = setInterval(() => get().fetch(true), 10 * 60 * 1000)
     console.log('[models] Background polling started')
   },
 
   stopPolling: () => {
-    if (_pollInterval) {
-      clearInterval(_pollInterval)
-      _pollInterval = null
-    }
+    if (_pollInterval) { clearInterval(_pollInterval); _pollInterval = null }
   },
 
   getInputModalities:  m => (m.architecture?.input_modalities  || ['text']).map(norm),
   getOutputModalities: m => (m.architecture?.output_modalities || ['text']).map(norm),
 
-  // Derive unique input→output modality pairs across all loaded models
-  getModalityPairs: () => {
-    const pairMap = new Map()
-    for (const m of get().models) {
-      const inputs  = [...new Set((m.architecture?.input_modalities  || ['text']).map(norm))]
-      const outputs = [...new Set((m.architecture?.output_modalities || ['text']).map(norm))]
-      for (const i of inputs) {
-        for (const o of outputs) {
-          const key = `${i}->${o}`
-          if (!pairMap.has(key)) pairMap.set(key, { key, input: i, output: o })
-        }
-      }
-    }
-    return [...pairMap.values()]
-  },
+  // Returns pre-computed pairs — no iteration on every call
+  getModalityPairs: () => get()._modalityPairs,
 
   filterModels: (query = '', pairFilter = null) => {
     const q = query.toLowerCase().replace(/[^a-z0-9]/g, '')
@@ -118,3 +99,19 @@ export const useModelStore = create((set, get) => ({
     })
   },
 }))
+
+// Pure function — computed once when models load, not on every render
+function computeModalityPairs(models) {
+  const pairMap = new Map()
+  for (const m of models) {
+    const inputs  = [...new Set((m.architecture?.input_modalities  || ['text']).map(norm))]
+    const outputs = [...new Set((m.architecture?.output_modalities || ['text']).map(norm))]
+    for (const i of inputs) {
+      for (const o of outputs) {
+        const key = `${i}->${o}`
+        if (!pairMap.has(key)) pairMap.set(key, { key, input: i, output: o })
+      }
+    }
+  }
+  return [...pairMap.values()]
+}

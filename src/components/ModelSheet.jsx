@@ -1,8 +1,7 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useMemo } from 'react'
 import { Search, X, Type, Image, Mic, Video, ChevronRight, Zap } from 'lucide-react'
 import { useModelStore, estimateMinSats } from '../utils/modelStore'
 
-// ── Modality icon ─────────────────────────────────────────────────────────────
 function ModalityIcon({ type, size = 11 }) {
   const props = { size, strokeWidth: 1.8 }
   if (type === 'image') return <Image {...props} />
@@ -33,11 +32,9 @@ function ModalityPill({ type, small }) {
   )
 }
 
-// ── Price dots (1-5, orange = expensive) ──────────────────────────────────────
 function PriceDots({ model, accent }) {
   const cost = model.sats_pricing?.completion
   if (!cost || cost <= 0) return <span style={{ color: '#888', fontSize: 10 }}>free</span>
-  // log scale: ~0.0001 (cheapest) to ~0.01 (expensive)
   const log  = Math.log10(cost)
   const dots = Math.min(5, Math.max(1, Math.round(((log + 4) / 2) * 5)))
   return (
@@ -52,7 +49,6 @@ function PriceDots({ model, accent }) {
   )
 }
 
-// ── Model display name ─────────────────────────────────────────────────────────
 function splitModelName(model) {
   if (model.name?.includes(':')) {
     const [provider, ...rest] = model.name.split(':')
@@ -61,41 +57,65 @@ function splitModelName(model) {
   return { provider: '', name: model.name || model.id }
 }
 
-// ── Main sheet ─────────────────────────────────────────────────────────────────
 export function ModelSheet({ show, onClose, selectedModel, onSelect, t }) {
-  const { models, loading, fetch, filterModels, getModalityPairs, getInputModalities, getOutputModalities } = useModelStore()
-  const [query, setQuery]         = useState('')
+  const models  = useModelStore(s => s.models)
+  const loading = useModelStore(s => s.loading)
+  const getModalityPairs    = useModelStore(s => s.getModalityPairs)
+  const filterModels        = useModelStore(s => s.filterModels)
+  const getInputModalities  = useModelStore(s => s.getInputModalities)
+  const getOutputModalities = useModelStore(s => s.getOutputModalities)
+
+  const [query, setQuery]           = useState('')
   const [pairFilter, setPairFilter] = useState(null)
   const searchRef = useRef(null)
 
-  // Focus search when opened — models are already loaded by App on mount
+  // Keep sheet in DOM — use CSS visibility for instant open (no rebuild on each open)
   useEffect(() => {
-    if (show) setTimeout(() => searchRef.current?.focus(), 80)
-    else { setQuery(''); setPairFilter(null) }
+    if (show) {
+      setTimeout(() => searchRef.current?.focus(), 80)
+    } else {
+      setQuery('')
+      setPairFilter(null)
+    }
   }, [show])
 
-  if (!show) return null
+  // Pre-computed pairs from store (not recalculated on every render)
+  const pairs = useMemo(() => getModalityPairs(), [models]) // eslint-disable-line
 
-  const pairs    = getModalityPairs()
-  const filtered = filterModels(query, pairFilter)
+  // Filtered list — only recomputed when query, pairFilter, or models change
+  const filtered = useMemo(
+    () => filterModels(query, pairFilter),
+    [query, pairFilter, models] // eslint-disable-line
+  )
 
+  // Always render — CSS controls visibility for instant open
   return (
-    <div onClick={onClose} style={{
-      position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)',
-      zIndex: 500, display: 'flex', alignItems: 'flex-end',
-    }}>
-      <div onClick={e => e.stopPropagation()} style={{
-        background: t.bgSecondary, border: `1px solid ${t.border}`,
-        borderRadius: '16px 16px 0 0', width: '100%',
-        maxHeight: '85dvh', display: 'flex', flexDirection: 'column',
-        boxShadow: t.shadow,
-      }}>
-
-        {/* ── Handle + search + filters ── */}
+    <div
+      onClick={onClose}
+      style={{
+        position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)',
+        zIndex: 500, display: 'flex', alignItems: 'flex-end',
+        // CSS show/hide instead of unmount — instant open, no DOM rebuild
+        opacity: show ? 1 : 0,
+        pointerEvents: show ? 'auto' : 'none',
+        transition: 'opacity 0.15s ease',
+      }}
+    >
+      <div
+        onClick={e => e.stopPropagation()}
+        style={{
+          background: t.bgSecondary, border: `1px solid ${t.border}`,
+          borderRadius: '16px 16px 0 0', width: '100%',
+          maxHeight: '85dvh', display: 'flex', flexDirection: 'column',
+          boxShadow: t.shadow,
+          transform: show ? 'translateY(0)' : 'translateY(100%)',
+          transition: 'transform 0.2s ease',
+        }}
+      >
+        {/* Handle + search + filters */}
         <div style={{ padding: '12px 16px 0', flexShrink: 0 }}>
           <div style={{ width: 36, height: 4, borderRadius: 2, background: t.border, margin: '0 auto 14px' }} />
 
-          {/* Search bar */}
           <div style={{
             display: 'flex', alignItems: 'center', gap: 8,
             background: t.bgTertiary, border: `1px solid ${t.border}`,
@@ -119,7 +139,6 @@ export function ModelSheet({ show, onClose, selectedModel, onSelect, t }) {
             )}
           </div>
 
-          {/* Modality filter pills */}
           {pairs.length > 0 && (
             <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', paddingBottom: 10 }}>
               {pairs.map(p => {
@@ -151,16 +170,13 @@ export function ModelSheet({ show, onClose, selectedModel, onSelect, t }) {
           )}
         </div>
 
-        {/* ── Model list ── */}
+        {/* Model list */}
         <div style={{ flex: 1, overflowY: 'auto', paddingBottom: 32 }}>
-
-          {/* Loading — only shown on very first fetch before any models arrive */}
           {loading && filtered.length === 0 && (
             <div style={{ textAlign: 'center', padding: '32px 0', color: t.textMuted, fontSize: 13 }}>
               Loading models...
             </div>
           )}
-
           {!loading && filtered.length === 0 && (
             <div style={{ textAlign: 'center', padding: '32px 0', color: t.textMuted, fontSize: 13 }}>
               No models found
@@ -186,14 +202,12 @@ export function ModelSheet({ show, onClose, selectedModel, onSelect, t }) {
                   display: 'flex', alignItems: 'center', gap: 10,
                 }}
               >
-                {/* Selection dot */}
                 <div style={{
                   width: 7, height: 7, borderRadius: '50%', flexShrink: 0,
                   background: isSelected ? t.accent : t.border,
                   boxShadow: isSelected ? `0 0 5px ${t.accent}` : 'none',
                 }} />
 
-                {/* Info */}
                 <div style={{ flex: 1, minWidth: 0 }}>
                   {provider && (
                     <div style={{ fontSize: 10, color: t.textMuted, marginBottom: 1 }}>{provider}</div>
@@ -205,7 +219,6 @@ export function ModelSheet({ show, onClose, selectedModel, onSelect, t }) {
                   }}>
                     {name}
                   </div>
-                  {/* Modality pills */}
                   <div style={{ display: 'flex', alignItems: 'center', gap: 3, flexWrap: 'wrap' }}>
                     {inputs.map(i => <ModalityPill key={i} type={i} />)}
                     <ChevronRight size={9} color={t.textMuted} strokeWidth={2} />
@@ -218,7 +231,6 @@ export function ModelSheet({ show, onClose, selectedModel, onSelect, t }) {
                   </div>
                 </div>
 
-                {/* Right: min sats + price dots */}
                 <div style={{ flexShrink: 0, display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 2, fontSize: 10, color: t.textMuted }}>
                     <Zap size={9} fill={t.accent} color={t.accent} />
@@ -234,4 +246,3 @@ export function ModelSheet({ show, onClose, selectedModel, onSelect, t }) {
     </div>
   )
 }
-

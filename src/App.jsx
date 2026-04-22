@@ -33,53 +33,99 @@ const GS = ({ t }) => (
   `}</style>
 )
 
+// Preferred cheap default models — first match found in API wins
+const PREFERRED_MODEL_IDS = [
+  'qwen/qwen3-14b',         // confirmed works on routstr
+  'qwen/qwen3.5-9b',
+  'qwen3-14b',
+  'qwen3.5-9b',
+  'meta-llama/llama-3.2-1b-instruct',
+]
+
+const MODEL_STORAGE_KEY = 'moutstr_selected_model'
+
+function saveModelToStorage(model) {
+  if (!model) return
+  try { localStorage.setItem(MODEL_STORAGE_KEY, JSON.stringify({ id: model.id, name: model.name })) } catch {}
+}
+
+function loadModelFromStorage() {
+  try { return JSON.parse(localStorage.getItem(MODEL_STORAGE_KEY) || 'null') } catch { return null }
+}
+
+function pickDefaultModel(models) {
+  if (!models.length) return null
+  // Try preferred list first
+  for (const id of PREFERRED_MODEL_IDS) {
+    const found = models.find(m => m.id === id || m.id?.toLowerCase() === id.toLowerCase())
+    if (found) return found
+  }
+  // Fallback: cheapest text→text model
+  const textModels = models.filter(m =>
+    (m.architecture?.input_modalities ?? ['text']).includes('text') &&
+    (m.architecture?.output_modalities ?? ['text']).includes('text')
+  )
+  if (!textModels.length) return models[0]
+  return textModels.reduce((best, m) =>
+    (m.sats_pricing?.completion ?? Infinity) < (best.sats_pricing?.completion ?? Infinity) ? m : best
+  )
+}
+
 function AppInner() {
-  const [theme, setTheme] = useState('dark')
-  const [view, setView]   = useState('list')
-  const [toast, setToast] = useState(null)
+  const [theme, setTheme]     = useState('dark')
+  const [view, setView]       = useState('list')
+  const [toast, setToast]     = useState(null)
   const [showWallet, setShowWallet] = useState(() => !!getPendingInvoice())
-  const [model, setModel] = useState(null)
+  const [model, setModelState] = useState(null)
 
   const t = THEMES[theme]
 
-  // ── Models — load cache first, then background refresh + polling ──
+  // Wrap setModel so every change is persisted
+  const setModel = (m) => {
+    setModelState(m)
+    saveModelToStorage(m)
+  }
+
+  // ── Models — load cache → restore saved selection → background fetch ──────
   useEffect(() => {
     const { loadFromCache, fetch: fetchM, startPolling } = useModelStore.getState()
 
-    const pickCheapModel = (models) => {
-      if (!models.length) return null
-      return models.find(m =>
-        m.architecture?.input_modalities?.includes('text') &&
-        m.architecture?.output_modalities?.includes('text') &&
-        (m.sats_pricing?.completion || 0) < 0.005
-      ) || models[0]
+    const resolveModel = (models) => {
+      if (!models.length) return
+
+      // Try to restore previously selected model
+      const saved = loadModelFromStorage()
+      if (saved?.id) {
+        const restored = models.find(m => m.id === saved.id)
+        if (restored) {
+          setModelState(restored)
+          return
+        }
+      }
+
+      // First load — pick default
+      setModelState(m => m || pickDefaultModel(models))
     }
 
-    // Step 1 — Dexie cache (instant)
+    // Step 1 — Dexie cache (instant, no network)
     loadFromCache().then(() => {
-      const { models } = useModelStore.getState()
-      if (models.length > 0) setModel(m => m || pickCheapModel(models))
+      resolveModel(useModelStore.getState().models)
     })
 
-    // Step 2 — fresh from API (background)
+    // Step 2 — Fresh from API (background, updates list)
     fetchM().then(() => {
-      const { models } = useModelStore.getState()
-      if (models.length > 0) setModel(m => m || pickCheapModel(models))
+      resolveModel(useModelStore.getState().models)
     })
 
-    // Step 3 — poll every 10 mins for changes
+    // Step 3 — Poll every 10 mins
     startPolling()
-
     return () => useModelStore.getState().stopPolling()
   }, []) // eslint-disable-line
 
-  // ── Wallet ──
-  const {
-    sats, connected, rawToken,
-    connect, onLightningPaid, disconnect,
-  } = useToken()
+  // ── Wallet ────────────────────────────────────────────────────────────────
+  const { sats, connected, rawToken, connect, onLightningPaid, disconnect } = useToken()
 
-  // ── Chat ──
+  // ── Chat ──────────────────────────────────────────────────────────────────
   const {
     chats, activeId, activeChat, loading,
     setActiveId, newChat, deleteChat,
@@ -88,7 +134,7 @@ function AppInner() {
 
   useEffect(() => { hydrate() }, []) // eslint-disable-line
 
-  // ── Lightning payment processor ──
+  // ── Lightning payment processor ───────────────────────────────────────────
   useMintQuoteProcessor({
     onQuotePaid: ({ sats: newSats }) => {
       onLightningPaid()
@@ -98,7 +144,6 @@ function AppInner() {
     },
   })
 
-  // ── Helpers ──
   const toast$ = (msg, type = 'error') => {
     setToast({ msg, type })
     setTimeout(() => setToast(null), 3500)
