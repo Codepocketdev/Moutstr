@@ -9,7 +9,7 @@ export function useChat() {
 
   const send = useCallback(async (input, modelId) => {
     const { activeId, activeChat } = useChatStore.getState()
-    const { rawToken, setRawToken, mintUrl } = useWalletStore.getState()
+    const { rawToken, mintUrl, applyChange, dropActiveToken } = useWalletStore.getState()
 
     if (!input.trim() || !activeId) return null
     if (!rawToken) return { error: 'No balance. Add funds first.' }
@@ -30,21 +30,9 @@ export function useChat() {
       const result = await sendMessage(rawToken, modelId, history)
 
       if (result.changeToken) {
-        try {
-          const decoded = getDecodedToken(result.changeToken)
-          const proofs  = decoded.proofs || decoded.token?.[0]?.proofs || []
-          const newSats = proofs.reduce((s, p) => s + (p.amount || 0), 0)
-          const newMint = decoded.mint || decoded.token?.[0]?.mint || mintUrl
-          await setRawToken(result.changeToken, newSats, newMint)
-          console.log('[moutstr] Change stored:', newSats, 'sats remaining')
-        } catch (e) {
-          // Came back but unparseable — keep existing token, next 402 will catch it
-          console.warn('[moutstr] Could not parse change token, keeping existing:', e)
-        }
+        await applyChange(result.changeToken, mintUrl)
       } else {
-        // No X-Cashu header — could be CORS or balance hit 0.
-        // Do NOT disconnect — keep token and let the next 402 tell us if it's gone.
-        console.warn('[moutstr] No X-Cashu header — keeping token, will discover on next send')
+        console.warn('[moutstr] No X-Cashu header returned')
       }
 
       await chatStore.addMessage(activeId, {
@@ -58,9 +46,12 @@ export function useChat() {
       await chatStore.removeMessage(activeId, userMsg.id)
 
       if (err.code === 402) {
-        return {
-          error: 'Not enough balance for this model. Try a cheaper model or top up your wallet.',
+        const hasNext = await dropActiveToken()
+        if (hasNext) {
+          chatStore.setLoading(false)
+          return send(input, modelId)
         }
+        return { error: 'Not enough balance. Top up your wallet to continue.' }
       }
 
       return { error: err.message }
