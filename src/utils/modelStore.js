@@ -10,10 +10,20 @@ function norm(v) {
   return 'text'
 }
 
+// Minimum number of completion tokens we consider "a usable response."
+// This is intentionally small - it answers "can the user afford even a
+// short reply from this model," not "what will a typical reply cost."
+// The actual worst-case cost of a sent request is bounded separately by
+// the max_tokens cap computed in utils/routstr.js, which derives its
+// limit from the user's real balance rather than this constant.
+const MIN_VIABLE_COMPLETION_TOKENS = 32
+
 export function estimateMinSats(model) {
   const p = model.sats_pricing
   if (!p) return 1
-  return Math.ceil((p.request || 0) + (p.completion || 0) * 200) || 1
+  return Math.ceil(
+    (p.request || 0) + (p.completion || 0) * MIN_VIABLE_COMPLETION_TOKENS
+  ) || 1
 }
 
 let _fetchPromise = null

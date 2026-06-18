@@ -1,18 +1,29 @@
 import { useCallback } from 'react'
 import { useChatStore } from '../utils/chatStore'
 import { useWalletStore } from '../utils/walletStore'
+import { useModelStore, estimateMinSats } from '../utils/modelStore'
 import { sendMessage } from '../utils/routstr'
-import { getDecodedToken } from '@cashu/cashu-ts'
 
 export function useChat() {
   const chatStore = useChatStore()
 
   const send = useCallback(async (input, modelId) => {
     const { activeId, activeChat } = useChatStore.getState()
-    const { rawToken, mintUrl, applyChange, dropActiveToken } = useWalletStore.getState()
+    const { rawToken, sats, mintUrl, applyChange } = useWalletStore.getState()
 
     if (!input.trim() || !activeId) return null
     if (!rawToken) return { error: 'No balance. Add funds first.' }
+
+    // Pre-flight: check balance vs model cost before sending anything
+    const models = useModelStore.getState().models
+    const modelObj = models.find(m => m.id === modelId)
+    const minCost = modelObj ? estimateMinSats(modelObj) : 1
+
+    if (sats < minCost) {
+      return {
+        error: `Not enough balance. This model needs ~${minCost} sats, you have ${sats} sats. Top up or pick a cheaper model.`,
+      }
+    }
 
     chatStore.setLoading(true)
 
@@ -27,7 +38,10 @@ export function useChat() {
     ]
 
     try {
-      const result = await sendMessage(rawToken, modelId, history)
+      const result = await sendMessage(rawToken, modelId, history, {
+        availableSats: sats,
+        model: modelObj,
+      })
 
       if (result.changeToken) {
         await applyChange(result.changeToken, mintUrl)
@@ -46,12 +60,11 @@ export function useChat() {
       await chatStore.removeMessage(activeId, userMsg.id)
 
       if (err.code === 402) {
-        const hasNext = await dropActiveToken()
-        if (hasNext) {
-          chatStore.setLoading(false)
-          return send(input, modelId)
+        // 402 = not enough balance for this model — token is NOT spent, keep it
+        const currentSats = useWalletStore.getState().sats
+        return {
+          error: `Not enough balance for this model. You have ${currentSats} sats — try a cheaper model or top up.`,
         }
-        return { error: 'Not enough balance. Top up your wallet to continue.' }
       }
 
       return { error: err.message }

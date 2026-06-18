@@ -19,15 +19,53 @@ export function encodeToken(mintUrl, proofs, unit = 'sat') {
   return getEncodedTokenV4({ mint: mintUrl, proofs, unit })
 }
 
-// ── Chat — raw Bearer + capture X-Cashu change header ────────────────────────
-export async function sendMessage(token, modelId, messages) {
+// Minimum/maximum bounds for the safety-net max_tokens cap below.
+const MIN_MAX_TOKENS = 16    // floor - below this a response is useless
+const MAX_MAX_TOKENS = 4096  // ceiling - sanity bound, avoid absurd values
+
+// Computes the largest max_tokens such that, even in the worst case
+// (every output token billed at the model's completion price), the
+// total cost cannot exceed the sats actually available. Returns null
+// if we don't have enough pricing/balance info to compute a safe cap
+// (caller then skips setting max_tokens entirely - strictly additive
+// safety net, never makes a previously-sendable message unsendable).
+function computeSafeMaxTokens(availableSats, model) {
+  if (typeof availableSats !== 'number' || availableSats <= 0) return null
+  const pricing = model && model.sats_pricing
+  if (!pricing) return null
+
+  const requestFee = pricing.request || 0
+  const perTokenCost = pricing.completion || 0
+  if (perTokenCost <= 0) return null
+
+  const remaining = availableSats - requestFee
+  if (remaining <= 0) return MIN_MAX_TOKENS
+
+  const safeTokens = Math.floor(remaining / perTokenCost)
+  return Math.max(MIN_MAX_TOKENS, Math.min(MAX_MAX_TOKENS, safeTokens))
+}
+
+// ── Chat - raw Bearer + capture X-Cashu change header ────────────────────────
+//
+// opts.availableSats / opts.model are optional but strongly recommended:
+// when provided, the request is capped with max_tokens so its worst-case
+// cost can never exceed what the user actually has.
+export async function sendMessage(token, modelId, messages, opts = {}) {
+  const { availableSats, model } = opts
+  const body = { model: modelId, messages, stream: false }
+
+  const maxTokens = computeSafeMaxTokens(availableSats, model)
+  if (maxTokens !== null) {
+    body.max_tokens = maxTokens
+  }
+
   const res = await fetch(`${BASE}/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${token}`,
     },
-    body: JSON.stringify({ model: modelId, messages, stream: false }),
+    body: JSON.stringify(body),
   })
 
   let data
